@@ -1,0 +1,95 @@
+name: Build Klipper firmware (SKR Mini E3 v3.0)
+
+# Triggers on every push to main/master, on tag pushes (v*), and via manual dispatch.
+# Produces a downloadable firmware.bin artifact pinned to the Klipper SHA in the submodule.
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build firmware.bin for SKR Mini E3 v3.0
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout wrapper repo + klipper submodule
+        uses: actions/checkout@v5
+        with:
+          submodules: true
+          fetch-depth: 1
+
+      - name: Report pinned Klipper SHA
+        id: klipper_sha
+        run: |
+          SHA=$(git -C klipper rev-parse HEAD)
+          SHORT=$(git -C klipper rev-parse --short HEAD)
+          DESC=$(git -C klipper describe --tags --long 2>/dev/null || echo "$SHA")
+          echo "sha=$SHA"        >> "$GITHUB_OUTPUT"
+          echo "short=$SHORT"    >> "$GITHUB_OUTPUT"
+          echo "describe=$DESC"  >> "$GITHUB_OUTPUT"
+          echo "Building Klipper $DESC ($SHORT)"
+
+      - name: Install ARM cross-compiler + Python deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-arm-none-eabi \
+            libnewlib-arm-none-eabi \
+            libstdc++-arm-none-eabi-newlib \
+            python3 python3-pip python3-venv
+          arm-none-eabi-gcc --version | head -1
+
+      - name: Install Kconfiglib (for make olddefconfig)
+        run: |
+          python3 -m venv ~/kbuild-venv
+          ~/kbuild-venv/bin/pip install --quiet kconfiglib
+          echo "~/kbuild-venv/bin" >> "$GITHUB_PATH"
+
+      - name: Apply SKR Mini E3 v3.0 build config
+        working-directory: klipper
+        run: |
+          cp "${{ github.workspace }}/skr-mini-e3-v3.0.config" .config
+          # Resolve implied defaults from Kconfig
+          make olddefconfig
+
+      - name: Build firmware
+        working-directory: klipper
+        run: |
+          make -j"$(nproc)"
+          ls -la out/
+
+      - name: Rename and stage artifact
+        id: artifact
+        working-directory: klipper
+        run: |
+          mkdir -p firmware-out
+          cp out/klipper.bin "firmware-out/klipper-${{ steps.klipper_sha.outputs.short }}.bin"
+          # SKR Mini E3 expects the file named firmware.bin on the SD card
+          cp out/klipper.bin firmware-out/firmware.bin
+          cp "${{ github.workspace }}/skr-mini-e3-v3.0.config" firmware-out/build.config
+          git -C .. log -1 --format='%H%n%ci' > firmware-out/SOURCE_COMMIT.txt 2>/dev/null || true
+          git rev-parse --short HEAD >> firmware-out/SOURCE_COMMIT.txt 2>/dev/null || true
+          ls -la firmware-out/
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: klipper-skr-mini-e3-v3.0-${{ steps.klipper_sha.outputs.short }}
+          path: klipper/firmware-out/
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Attach to release (on tag push)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            klipper/firmware-out/klipper-${{ steps.klipper_sha.outputs.short }}.bin
+            klipper/firmware-out/build.config
+            klipper/firmware-out/SOURCE_COMMIT.txt
+          generate_release_notes: true

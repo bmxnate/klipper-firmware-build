@@ -1,0 +1,12 @@
+# Klipper submodule build output
+klipper/out/
+klipper/ci_build/
+klipper/ci_cache/
+klipper/.config
+!skr-mini-e3-v3.0.config
+
+# Local scratch
+*.bin
+*.elf
+*.dict
+*~

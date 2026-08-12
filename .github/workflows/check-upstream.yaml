@@ -1,0 +1,67 @@
+name: Check upstream Klipper for new commits
+
+# Weekly check: compare the Klipper SHA pinned in our submodule against
+# upstream master. If they differ, open a GitHub Issue alerting the maintainer
+# with the new SHA + a copy-paste bump command. Does NOT auto-bump.
+#
+# Design choice: alert-only (not auto-PR) per the maintainer's "Confirm First"
+# rule. Opening issues needs only the default GITHUB_TOKEN (no PAT, no write
+# perms to the repo contents).
+
+on:
+  schedule:
+    # 06:00 UTC every Monday
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check-upstream:
+    name: Compare pinned vs upstream Klipper SHA
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout wrapper repo + klipper submodule
+        uses: actions/checkout@v5
+        with:
+          submodules: true
+          fetch-depth: 1
+
+      - name: Read pinned Klipper SHA
+        id: pinned
+        run: |
+          PINNED=$(git -C klipper rev-parse HEAD)
+          PINNED_SHORT=$(git -C klipper rev-parse --short HEAD)
+          PINNED_DESC=$(git -C klipper describe --tags --long 2>/dev/null || echo "$PINNED")
+          echo "sha=$PINNED"           >> "$GITHUB_OUTPUT"
+          echo "short=$PINNED_SHORT"   >> "$GITHUB_OUTPUT"
+          echo "describe=$PINNED_DESC" >> "$GITHUB_OUTPUT"
+          echo "Pinned Klipper: $PINNED_DESC ($PINNED_SHORT)"
+
+      - name: Fetch upstream Klipper master SHA
+        id: upstream
+        run: |
+          UPSTREAM=$(git ls-remote https://github.com/Klipper3d/klipper.git refs/heads/master | awk '{print $1}')
+          UPSTREAM_SHORT=${UPSTREAM:0:7}
+          # Get last commit subject for context (shallow fetch)
+          UPSTREAM_SUBJECT=$(git -C klipper log -1 --format='%s' "$UPSTREAM" 2>/dev/null || echo "(subject unavailable)")
+          echo "sha=$UPSTREAM"               >> "$GITHUB_OUTPUT"
+          echo "short=$UPSTREAM_SHORT"       >> "$GITHUB_OUTPUT"
+          echo "subject=$UPSTREAM_SUBJECT"   >> "$GITHUB_OUTPUT"
+          echo "Upstream Klipper master: $UPSTREAM_SHORT - $UPSTREAM_SUBJECT"
+
+      - name: Open issue if upstream advanced
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PINNED: ${{ steps.pinned.outputs.sha }}
+          PINNED_SHORT: ${{ steps.pinned.outputs.short }}
+          PINNED_DESC: ${{ steps.pinned.outputs.describe }}
+          UPSTREAM: ${{ steps.upstream.outputs.sha }}
+          UPSTREAM_SHORT: ${{ steps.upstream.outputs.short }}
+          UPSTREAM_SUBJECT: ${{ steps.upstream.outputs.subject }}
+        run: |
+          chmod +x scripts/upstream-bump-issue.sh
+          ./scripts/upstream-bump-issue.sh

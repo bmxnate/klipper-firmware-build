@@ -109,15 +109,17 @@ jobs:
           cp out/klipper.bin firmware-out/firmware.bin
           # Unique-named copy that satisfies the "must not match last filename" rule
           cp out/klipper.bin "firmware-out/firmware-$(date +%Y%m%d)-${{ matrix.board }}.bin"
-          cp "${{ github.workspace }}/boards/${{ matrix.board }}.config" firmware-out/build.config
+          # Per-board provenance files (prefixed to avoid collision when multiple
+          # matrix jobs attach to the same GitHub Release)
+          cp "${{ github.workspace }}/boards/${{ matrix.board }}.config" "firmware-out/${{ matrix.board }}.build.config"
           {
+            echo "board=${{ matrix.board }}"
             echo "klipper_sha=${{ steps.klipper_sha.outputs.sha }}"
             echo "klipper_short=${{ steps.klipper_sha.outputs.short }}"
             echo "klipper_describe=${{ steps.klipper_sha.outputs.describe }}"
-            echo "board=${{ matrix.board }}"
             echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
             echo "workflow_run=${{ github.run_id }}"
-          } > firmware-out/SOURCE_COMMIT.txt
+          } > "firmware-out/${{ matrix.board }}.SOURCE_COMMIT.txt"
           ls -la firmware-out/
 
       - name: Upload firmware artifact
@@ -134,6 +136,6 @@ jobs:
         with:
           files: |
             klipper/firmware-out/klipper-${{ matrix.board }}-${{ steps.klipper_sha.outputs.short }}.bin
-            klipper/firmware-out/build.config
-            klipper/firmware-out/SOURCE_COMMIT.txt
+            klipper/firmware-out/${{ matrix.board }}.build.config
+            klipper/firmware-out/${{ matrix.board }}.SOURCE_COMMIT.txt
           generate_release_notes: true

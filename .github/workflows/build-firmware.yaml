@@ -1,7 +1,9 @@
-name: Build Klipper firmware (SKR Mini E3 v3.0)
+name: Build Klipper firmware (multi-board)
 
-# Triggers on every push to main/master, on tag pushes (v*), and via manual dispatch.
-# Produces a downloadable firmware.bin artifact pinned to the Klipper SHA in the submodule.
+# Builds a firmware.bin for every file in boards/*.config.
+# Triggers on push to main/master, on v* tags, and via manual dispatch.
+# Each board produces its own artifact named per its config filename,
+# pinned to the Klipper SHA pinned in the submodule.
 on:
   push:
     branches: [main, master]
@@ -9,12 +11,41 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write   # needed by softprops/action-gh-release on tag pushes
 
 jobs:
-  build:
-    name: Build firmware.bin for SKR Mini E3 v3.0
+  # Discover board configs dynamically so adding a new boards/*.config
+  # file is enough — no workflow edit needed.
+  list-boards:
+    name: Discover board configs
     runs-on: ubuntu-22.04
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v5
+        with: { submodules: false, fetch-depth: 1 }
+
+      - name: Build matrix from boards/*.config
+        id: set-matrix
+        run: |
+          # Emit a JSON array of board basenames (without .config)
+          BOARDS=$(ls boards/*.config 2>/dev/null | xargs -n1 basename -s .config)
+          if [ -z "$BOARDS" ]; then
+            echo "::error::No board configs found in boards/"
+            exit 1
+          fi
+          # Build JSON matrix: [{"board": "skr-mini-e3-v3.0"}, ...]
+          MATRIX_JSON=$(printf '%s\n' "$BOARDS" | jq -R . | jq -sc '{board: .}')
+          echo "matrix=$MATRIX_JSON" >> "$GITHUB_OUTPUT"
+          echo "Discovered boards: $MATRIX_JSON"
+
+  build:
+    name: Build ${{ matrix.board }}
+    needs: list-boards
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix: ${{ fromJson(needs.list-boards.outputs.matrix) }}
+      fail-fast: false   # one board failing shouldn't cancel the others
 
     steps:
       - name: Checkout wrapper repo + klipper submodule
@@ -29,10 +60,10 @@ jobs:
           SHA=$(git -C klipper rev-parse HEAD)
           SHORT=$(git -C klipper rev-parse --short HEAD)
           DESC=$(git -C klipper describe --tags --long 2>/dev/null || echo "$SHA")
-          echo "sha=$SHA"        >> "$GITHUB_OUTPUT"
-          echo "short=$SHORT"    >> "$GITHUB_OUTPUT"
-          echo "describe=$DESC"  >> "$GITHUB_OUTPUT"
-          echo "Building Klipper $DESC ($SHORT)"
+          echo "sha=$SHA"       >> "$GITHUB_OUTPUT"
+          echo "short=$SHORT"   >> "$GITHUB_OUTPUT"
+          echo "describe=$DESC" >> "$GITHUB_OUTPUT"
+          echo "Building Klipper $DESC ($SHORT) for ${{ matrix.board }}"
 
       - name: Install ARM cross-compiler + Python deps
         run: |
@@ -41,7 +72,7 @@ jobs:
             gcc-arm-none-eabi \
             libnewlib-arm-none-eabi \
             libstdc++-arm-none-eabi-newlib \
-            python3 python3-pip python3-venv
+            python3 python3-pip python3-venv jq
           arm-none-eabi-gcc --version | head -1
 
       - name: Install Kconfiglib (for make olddefconfig)
@@ -50,12 +81,14 @@ jobs:
           ~/kbuild-venv/bin/pip install --quiet kconfiglib
           echo "~/kbuild-venv/bin" >> "$GITHUB_PATH"
 
-      - name: Apply SKR Mini E3 v3.0 build config
+      - name: Apply board build config
         working-directory: klipper
         run: |
-          cp "${{ github.workspace }}/skr-mini-e3-v3.0.config" .config
+          cp "${{ github.workspace }}/boards/${{ matrix.board }}.config" .config
           # Resolve implied defaults from Kconfig
           make olddefconfig
+          echo "=== Resolved .config ==="
+          grep -E 'CONFIG_MACH_|CONFIG_STM32|CONFIG_FLASH|CONFIG_SERIAL|CONFIG_USB|SWD' .config || true
 
       - name: Build firmware
         working-directory: klipper
@@ -68,18 +101,29 @@ jobs:
         working-directory: klipper
         run: |
           mkdir -p firmware-out
-          cp out/klipper.bin "firmware-out/klipper-${{ steps.klipper_sha.outputs.short }}.bin"
-          # SKR Mini E3 expects the file named firmware.bin on the SD card
+          # SHA-tagged filename for traceability
+          cp out/klipper.bin "firmware-out/klipper-${{ matrix.board }}-${{ steps.klipper_sha.outputs.short }}.bin"
+          # Generic firmware.bin — most boards want this exact name on the SD card.
+          # NOTE: SV08/SV06 bootloader refuses a filename matching the *last* flashed
+          # file, so we also ship a unique-name copy below.
           cp out/klipper.bin firmware-out/firmware.bin
-          cp "${{ github.workspace }}/skr-mini-e3-v3.0.config" firmware-out/build.config
-          git -C .. log -1 --format='%H%n%ci' > firmware-out/SOURCE_COMMIT.txt 2>/dev/null || true
-          git rev-parse --short HEAD >> firmware-out/SOURCE_COMMIT.txt 2>/dev/null || true
+          # Unique-named copy that satisfies the "must not match last filename" rule
+          cp out/klipper.bin "firmware-out/firmware-$(date +%Y%m%d)-${{ matrix.board }}.bin"
+          cp "${{ github.workspace }}/boards/${{ matrix.board }}.config" firmware-out/build.config
+          {
+            echo "klipper_sha=${{ steps.klipper_sha.outputs.sha }}"
+            echo "klipper_short=${{ steps.klipper_sha.outputs.short }}"
+            echo "klipper_describe=${{ steps.klipper_sha.outputs.describe }}"
+            echo "board=${{ matrix.board }}"
+            echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "workflow_run=${{ github.run_id }}"
+          } > firmware-out/SOURCE_COMMIT.txt
           ls -la firmware-out/
 
       - name: Upload firmware artifact
         uses: actions/upload-artifact@v4
         with:
-          name: klipper-skr-mini-e3-v3.0-${{ steps.klipper_sha.outputs.short }}
+          name: klipper-${{ matrix.board }}-${{ steps.klipper_sha.outputs.short }}
           path: klipper/firmware-out/
           if-no-files-found: error
           retention-days: 90
@@ -89,7 +133,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            klipper/firmware-out/klipper-${{ steps.klipper_sha.outputs.short }}.bin
+            klipper/firmware-out/klipper-${{ matrix.board }}-${{ steps.klipper_sha.outputs.short }}.bin
             klipper/firmware-out/build.config
             klipper/firmware-out/SOURCE_COMMIT.txt
           generate_release_notes: true

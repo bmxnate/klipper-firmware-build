@@ -3,7 +3,9 @@ klipper/out/
 klipper/ci_build/
 klipper/ci_cache/
 klipper/.config
-!skr-mini-e3-v3.0.config
+
+# Board configs are tracked (in boards/)
+!boards/*.config
 
 # Local scratch
 *.bin
